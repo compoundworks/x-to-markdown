@@ -1,9 +1,13 @@
 // ==UserScript==
 // @name         X 記事・ポスト取得（Markdownコピー）
 // @namespace    sofuri.x.grabber
-// @version      1.0.7
+// @version      1.0.8
 // @description  Xの記事(長文Articles)や通常ポスト/スレッド/引用RTのタイトル・本文を、画面のボタン一発でMarkdownとしてクリップボードにコピーする
 // @author       Sofuri
+// @homepageURL  https://github.com/sofuri-tokyo/x-to-markdown
+// @supportURL   https://github.com/sofuri-tokyo/x-to-markdown/issues
+// @downloadURL  https://raw.githubusercontent.com/sofuri-tokyo/x-to-markdown/main/x-to-markdown.user.js
+// @updateURL    https://raw.githubusercontent.com/sofuri-tokyo/x-to-markdown/main/x-to-markdown.user.js
 // @match        https://x.com/*
 // @match        https://twitter.com/*
 // @grant        GM_setClipboard

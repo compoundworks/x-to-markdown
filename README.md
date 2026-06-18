@@ -35,7 +35,7 @@ X（Twitter）の記事・ポストを、ボタンひとつで丸ごと **Markdo
 | **外部読み込み** | `@require` / `@resource` なし。外部のコードやライブラリを読み込みません |
 | **動的コード** | `eval` などの動的コード実行なし |
 
-要するに、**取得したMarkdownはあなたのクリップボードに入るだけで、外には出ていきません。** 心配な人はインストール前に `x-grabber.user.js` を上から下まで読んでください（短いです）。
+要するに、**取得したMarkdownはあなたのクリップボードに入るだけで、外には出ていきません。** 心配な人はインストール前に `x-to-markdown.user.js` を上から下まで読んでください（短いです）。
 
 ---
 
@@ -43,9 +43,9 @@ X（Twitter）の記事・ポストを、ボタンひとつで丸ごと **Markdo
 
 1. ブラウザに **Tampermonkey** 拡張を入れる
    - [Chrome / Edge / Arc](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo) ／ [Firefox](https://addons.mozilla.org/firefox/addon/tampermonkey/) ／ Safari は App Store の Tampermonkey
-2. このリポジトリの **`x-grabber.user.js`** を開く
+2. このリポジトリの **`x-to-markdown.user.js`** を開く
 3. Tampermonkey ダッシュボード →「新規スクリプトを作成」→ 中身を貼り付けて保存
-   - もしくは `x-grabber.user.js` をブラウザにドラッグ → インストール画面で「インストール」
+   - もしくは `x-to-markdown.user.js` をブラウザにドラッグ → インストール画面で「インストール」
 4. `x.com` を開く → 画面右下に **「📋 取得」** ボタンが出れば完了
 
 ---
