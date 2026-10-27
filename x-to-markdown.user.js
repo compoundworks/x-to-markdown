@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         X 記事・ポスト取得（Markdownコピー）
 // @namespace    sofuri.x.grabber
-// @version      1.0.8
-// @description  Xの記事(長文Articles)や通常ポスト/スレッド/引用RTのタイトル・本文を、画面のボタン一発でMarkdownとしてクリップボードにコピーする
+// @version      1.1.0
+// @description  Xの記事(長文Articles)や通常ポスト/スレッド/引用RT/リプライ一覧を、画面のボタン一発でMarkdownとしてクリップボードにコピーする
 // @author       Sofuri
-// @homepageURL  https://github.com/sofuri-tokyo/x-to-markdown
-// @supportURL   https://github.com/sofuri-tokyo/x-to-markdown/issues
-// @downloadURL  https://raw.githubusercontent.com/sofuri-tokyo/x-to-markdown/main/x-to-markdown.user.js
-// @updateURL    https://raw.githubusercontent.com/sofuri-tokyo/x-to-markdown/main/x-to-markdown.user.js
+// @homepageURL  https://github.com/compoundworks/x-to-markdown
+// @supportURL   https://github.com/compoundworks/x-to-markdown/issues
+// @downloadURL  https://raw.githubusercontent.com/compoundworks/x-to-markdown/main/x-to-markdown.user.js
+// @updateURL    https://raw.githubusercontent.com/compoundworks/x-to-markdown/main/x-to-markdown.user.js
 // @match        https://x.com/*
 // @match        https://twitter.com/*
 // @grant        GM_setClipboard
@@ -24,6 +24,7 @@
   // ───────────────────────────────────────────────
   const CFG = {
     btnLabel: '📋 取得',
+    replyBtnLabel: '💬 リプライ',
     // localStorage に xgrab_debug=1 を入れると console に詳細ログを出す
     debug: localStorage.getItem('xgrab_debug') === '1',
   };
@@ -256,6 +257,143 @@
   }
 
   // ───────────────────────────────────────────────
+  // リプライ一括取得（2026-07-22 追加）
+  //   ツイート個別ページで、元ツイート＋ぶら下がる返信を自動スクロールで
+  //   集めて 1 枚の Markdown にする。広告は除外、各返信にいいね数を添える。
+  //   上限 300件 or 60秒。実行中はボタンが「停止」になり、押した時点までをコピー。
+  // ───────────────────────────────────────────────
+  const RCFG = {
+    maxReplies: 300,
+    maxMs: 60000,
+    stepMs: 700,   // スクロール間隔（速すぎると機械的アクセス扱いのリスク）
+    idleStop: 3,   // 底に着いて新規ゼロが3回続いたら「全部読み込んだ」と判定
+  };
+
+  // article 自身の status ID（time を包む a が最優先。無ければ /status/<id> 終わりのリンク）
+  function statusIdOf(articleEl) {
+    const t = articleEl.querySelector('time');
+    const ta = t && t.closest('a');
+    let m = ta && (ta.getAttribute('href') || '').match(/\/status\/(\d+)/);
+    if (m) return m[1];
+    for (const link of articleEl.querySelectorAll('a[href*="/status/"]')) {
+      m = (link.getAttribute('href') || '').match(/\/status\/(\d+)$/);
+      if (m) return m[1];
+    }
+    return '';
+  }
+
+  // 広告（プロモーション）判定：placementTracking コンテナ or ラベル単独 span
+  function isPromoted(articleEl) {
+    if (articleEl.closest('[data-testid="placementTracking"]')) return true;
+    const cell = articleEl.closest('[data-testid="cellInnerDiv"]') || articleEl;
+    if (cell.querySelector('[data-testid="placementTracking"]')) return true;
+    for (const s of articleEl.querySelectorAll('span')) {
+      const t = s.textContent.trim();
+      if (t === 'プロモーション' || t === 'Promoted' || t === 'Ad') return true;
+    }
+    return false;
+  }
+
+  // いいね数：aria-label の数字が正（"456 件のいいね" / "456 Likes"）、表示の省略形はフォールバック
+  function likeCount(articleEl) {
+    const btn = articleEl.querySelector('[data-testid="like"], [data-testid="unlike"]');
+    if (!btn) return '';
+    const label = btn.getAttribute('aria-label') || '';
+    const m = label.match(/([\d,]+)\s*件のいいね/) || label.match(/([\d,]+)\s+Likes?/i);
+    if (m) return m[1].replace(/,/g, '');
+    const t = (btn.textContent || '').trim();
+    return /^[\d,.]+[KMB万億]?$/.test(t) ? t : '';
+  }
+
+  // 「返信への返信」（上と繋がっている返信）判定 — ヒューリスティック・実DOM確認待ち。
+  // 繋がっている返信はアバター列のアバターより前に縦線ブロックが入る想定。
+  // 外れても「インデントが付かない」だけで、返信自体は取りこぼさない。
+  function isConnectedToPrev(articleEl) {
+    const av = articleEl.querySelector('[data-testid="Tweet-User-Avatar"]');
+    return !!(av && av.previousElementSibling);
+  }
+
+  // いま DOM にある article を1回スキャンして state に貯める。
+  // X は仮想リスト（スクロールで過去の article が消える）ので、見えたその場で吸い上げる。
+  function harvestReplies(state) {
+    document.querySelectorAll('article[data-testid="tweet"]').forEach((a) => {
+      const id = statusIdOf(a);
+      if (!id) return;
+      if (id === state.targetId) {
+        if (!state.mainMd) state.mainMd = articleToFullMd(a, location.href);
+        return;
+      }
+      if (state.seen.has(id) || state.ads.has(id)) return;
+      if (isPromoted(a)) { state.ads.add(id); return; }
+      const p = extractPost(a, findQuoted(a));
+      if (!p.text && !(p.images && p.images.length)) return;
+      state.seen.set(id, {
+        handle: p.handle, displayName: p.displayName, text: p.text,
+        images: p.images, likes: likeCount(a),
+        depth: isConnectedToPrev(a) ? 1 : 0,
+      });
+    });
+  }
+
+  function repliesToMd(state, note) {
+    const replies = Array.from(state.seen.values());
+    const lines = ['# 元ツイート', ''];
+    lines.push(state.mainMd || `(元ツイート本文を取得できませんでした)\n${location.href}`);
+    lines.push('');
+    const extra = [state.ads.size ? `広告${state.ads.size}件除外` : '', note || '']
+      .filter(Boolean).join('・');
+    lines.push(`## リプライ（${replies.length}件${extra ? '・' + extra : ''}）`, '');
+    for (const r of replies) {
+      const ind = r.depth ? '    ' : '';
+      const name = r.handle || r.displayName || '(不明)';
+      const text = (r.text || '').split('\n').join(`\n${ind}  `);
+      lines.push(`${ind}- **${name}**: ${text}${r.likes ? ` ♡${r.likes}` : ''}`);
+      (r.images || []).forEach((u, i) => lines.push(`${ind}  ![image${i + 1}](${u})`));
+    }
+    return lines.join('\n').trim() + '\n';
+  }
+
+  let replyRun = null;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  async function grabRepliesFlow() {
+    const m = location.pathname.match(/\/status\/(\d+)/);
+    if (!m) { toast('ツイートの個別ページを開いてから押してください'); return; }
+    if (replyRun) { replyRun.stop = true; return; } // 実行中の再クリック＝停止
+    const btn = document.getElementById('xgrab-replies-btn');
+    const state = { targetId: m[1], seen: new Map(), ads: new Set(), mainMd: '' };
+    replyRun = { stop: false };
+    const t0 = Date.now();
+    let idle = 0, last = -1, note = '';
+    try {
+      try { window.scrollTo(0, 0); } catch (_) {}
+      await sleep(600);
+      while (true) {
+        harvestReplies(state);
+        if (btn) btn.textContent = `■ 停止（${state.seen.size}件）`;
+        if (replyRun.stop) { note = '途中停止'; break; }
+        if (state.seen.size >= RCFG.maxReplies) { note = `上限${RCFG.maxReplies}件で打ち切り`; break; }
+        if (Date.now() - t0 > RCFG.maxMs) { note = `${Math.round(RCFG.maxMs / 1000)}秒で打ち切り`; break; }
+        const atBottom = window.innerHeight + window.scrollY >= (document.body.scrollHeight - 60);
+        if (atBottom && state.seen.size === last) idle++; else idle = 0;
+        if (idle >= RCFG.idleStop) break; // 底＝全部読み込んだ
+        last = state.seen.size;
+        try { window.scrollBy(0, Math.round(window.innerHeight * 0.9)); } catch (_) {}
+        await sleep(RCFG.stepMs);
+      }
+      copy(repliesToMd(state, note));
+      const adMsg = state.ads.size ? `（広告${state.ads.size}件除外）` : '';
+      toast(`リプライ ${state.seen.size} 件を取得しました${adMsg}${note ? '・' + note : ''}`);
+    } catch (err) {
+      console.error('[xgrab]', err);
+      toast('リプライ取得に失敗しました（コンソール参照）');
+    } finally {
+      replyRun = null;
+      if (btn) btn.textContent = CFG.replyBtnLabel;
+    }
+  }
+
+  // ───────────────────────────────────────────────
   // クリック時の本処理（記事 → ポスト/スレッドの順で判定）
   // ───────────────────────────────────────────────
   function grab() {
@@ -315,8 +453,14 @@
     'background:#1d9bf0;border:none;border-radius:9999px;padding:12px 18px;' +
     'box-shadow:0 2px 12px rgba(0,0,0,.35);cursor:pointer;opacity:.96;';
 
+  const REPLY_BTN_CSS =
+    'position:fixed;right:20px;bottom:196px;z-index:2147483647;' +
+    'font:600 14px/1 -apple-system,system-ui,sans-serif;color:#fff;' +
+    'background:#536471;border:none;border-radius:9999px;padding:12px 18px;' +
+    'box-shadow:0 2px 12px rgba(0,0,0,.35);cursor:pointer;opacity:.96;';
+
   const TOAST_CSS =
-    'position:fixed;right:20px;bottom:202px;z-index:2147483647;' +
+    'position:fixed;right:20px;bottom:250px;z-index:2147483647;' +
     'font:500 13px/1.4 -apple-system,system-ui,sans-serif;color:#0f1419;' +
     'background:#fff;border:1px solid #e1e8ed;border-radius:10px;padding:10px 14px;' +
     'max-width:280px;box-shadow:0 4px 16px rgba(0,0,0,.2);' +
@@ -339,21 +483,36 @@
   }
 
   function ensureButton() {
-    if (document.getElementById('xgrab-btn')) return;
     if (!document.body) return;
-    const btn = document.createElement('button');
-    btn.id = 'xgrab-btn';
-    btn.type = 'button';
-    btn.textContent = CFG.btnLabel;
-    btn.title = 'この記事/ポストをMarkdownでコピー';
-    btn.style.cssText = BTN_CSS;
-    btn.addEventListener('click', (e) => {
-      e.preventDefault(); e.stopPropagation();
-      try { toast(grab()); }
-      catch (err) { console.error('[xgrab]', err); toast('取得に失敗しました（コンソール参照）'); }
-    });
-    document.body.appendChild(btn);
-    log('button injected');
+    if (!document.getElementById('xgrab-btn')) {
+      const btn = document.createElement('button');
+      btn.id = 'xgrab-btn';
+      btn.type = 'button';
+      btn.textContent = CFG.btnLabel;
+      btn.title = 'この記事/ポストをMarkdownでコピー';
+      btn.style.cssText = BTN_CSS;
+      btn.addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        try { toast(grab()); }
+        catch (err) { console.error('[xgrab]', err); toast('取得に失敗しました（コンソール参照）'); }
+      });
+      document.body.appendChild(btn);
+      log('button injected');
+    }
+    if (!document.getElementById('xgrab-replies-btn')) {
+      const rbtn = document.createElement('button');
+      rbtn.id = 'xgrab-replies-btn';
+      rbtn.type = 'button';
+      rbtn.textContent = CFG.replyBtnLabel;
+      rbtn.title = '元ツイート＋リプライ一覧をMarkdownでコピー（自動スクロール収集・再クリックで停止）';
+      rbtn.style.cssText = REPLY_BTN_CSS;
+      rbtn.addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        grabRepliesFlow();
+      });
+      document.body.appendChild(rbtn);
+      log('replies button injected');
+    }
   }
 
   // ───────────────────────────────────────────────
@@ -390,6 +549,7 @@
         alert('[X取得] 失敗: ' + err.message);
       }
     });
+    GM_registerMenuCommand('💬 リプライを一括取得', () => { grabRepliesFlow(); });
     GM_registerMenuCommand('🔧 DOM構造をコピー（デバッグ）', () => {
       try { const m = domDump(); toast(m); alert('[X取得] ' + m); }
       catch (err) { console.error('[xgrab]', err); alert('[X取得] dump失敗: ' + err.message); }
@@ -400,5 +560,14 @@
   const obs = new MutationObserver(() => ensureButton());
   obs.observe(document.documentElement, { childList: true, subtree: true });
   ensureButton();
+
+  // テスト用フック：localStorage に xgrab_test=1 があるときだけ内部関数を晒す
+  // （jsdom フィクスチャから抽出ロジックを直接検証するため。通常利用では何もしない）
+  if (localStorage.getItem('xgrab_test') === '1') {
+    window.__xgrab = {
+      extractPost, findQuoted, articleToFullMd, pickMainTweet, grab,
+      harvestReplies, repliesToMd, isPromoted, likeCount, statusIdOf, isConnectedToPrev,
+    };
+  }
   log('loaded');
 })();
